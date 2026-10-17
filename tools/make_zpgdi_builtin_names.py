@@ -1,0 +1,206 @@
+#!/usr/bin/env python3
+"""Generate the built-in ZPGDI speaker-name table.
+
+Input is _work/text/speaker_names_to_translate.tsv.  The generated header is
+included by ZPGDI_proxy.c so the game root no longer needs zpgdi_names.tsv.
+"""
+
+from __future__ import annotations
+
+import csv
+import pathlib
+import sys
+
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+INPUT = ROOT / "_work" / "text" / "speaker_names_to_translate.tsv"
+OUTPUT = ROOT / "tools" / "zpgdi_builtin_names.h"
+REPORT = ROOT / "_work" / "text" / "zpgdi_builtin_names_report.tsv"
+MAX_NAMES = 256
+MAX_NAME_GLYPHS = 16
+PRIORITY_NAMES = [
+    # Playable / portrait / menu characters first — these appear on the LOAD
+    # screen, character menu tabs and portrait dialogues (SJIS, no GBK marker),
+    # so they must win the shared glyphs.  Field/bubble dialogues use GBK
+    # markers and do NOT depend on this table.
+    "メディチ", "ルイ", "ボルス", "シラノ", "カーナ", "クリス",
+    "イオリーン", "メルセデス", "エステ", "リデル", "イザベル",
+    "フレデリック卿", "ガーネット", "クラウジビッツ", "チェザレ",
+    "警備兵", "白髪囚人", "白髪の囚人",
+]
+
+
+def c_array(values: list[int]) -> str:
+    return ", ".join(f"0x{v:02X}" for v in values)
+
+
+def c_warray(text: str) -> str:
+    units = text.encode("utf-16-le")
+    values = [units[i] | (units[i + 1] << 8) for i in range(0, len(units), 2)]
+    return ", ".join(f"0x{v:04X}" for v in values)
+
+
+def add_name(rows: list[dict[str, object]], seen: set[str], warnings: list[str], jp: str, cn: str) -> None:
+    jp = jp.strip()
+    cn = cn.strip()
+    if not jp or not cn or jp in seen:
+        return
+    seen.add(jp)
+
+    try:
+        sjis = jp.encode("cp932")
+    except UnicodeEncodeError as exc:
+        warnings.append(f"SKIP\tcp932\t{jp}\t{cn}\t{exc}")
+        return
+
+    if len(sjis) % 2:
+        warnings.append(f"SKIP\todd_sjis_len\t{jp}\t{cn}\t{len(sjis)}")
+        return
+
+    glyphs = len(sjis) // 2
+    if glyphs <= 0 or glyphs > MAX_NAME_GLYPHS:
+        warnings.append(f"SKIP\tglyphs_out_of_range\t{jp}\t{cn}\t{glyphs}")
+        return
+
+    if len(cn) > MAX_NAME_GLYPHS:
+        warnings.append(f"TRUNCATE\tcn_too_long_for_table\t{jp}\t{cn}\t{len(cn)}")
+        cn = cn[:MAX_NAME_GLYPHS]
+    if len(cn) > glyphs:
+        warnings.append(f"NOTE\tname_plate_truncates_visually\t{jp}\t{cn}\t{len(cn)}>{glyphs}")
+
+    rows.append({"jp": jp, "cn": cn, "sjis": sjis, "glyphs": glyphs})
+
+
+def build_glyph_rows(rows: list[dict[str, object]], warnings: list[str]) -> list[dict[str, object]]:
+    by_name = {str(row["jp"]): row for row in rows}
+    assigned: dict[bytes, dict[str, object]] = {}
+    conflicts: list[tuple[bytes, str, str, str, str]] = []
+
+    def assign_from(row: dict[str, object], priority: int) -> None:
+        jp = str(row["jp"])
+        cn = str(row["cn"])
+        sjis = bytes(row["sjis"])  # type: ignore[arg-type]
+        glyphs = int(row["glyphs"])
+        for i in range(glyphs):
+            pair = sjis[i * 2 : i * 2 + 2]
+            wc = cn[i] if i < len(cn) else " "
+            if pair in assigned:
+                old = assigned[pair]
+                if old["wc"] != wc:
+                    conflicts.append((pair, str(old["jp"]), str(old["wc"]), jp, wc))
+                continue
+            assigned[pair] = {"sjis": pair, "wc": wc, "jp": jp, "priority": priority}
+
+    for priority_name in PRIORITY_NAMES:
+        row = by_name.get(priority_name)
+        if row:
+            assign_from(row, 0)
+
+    for row in rows:
+        assign_from(row, 1)
+
+    for pair, old_jp, old_wc, new_jp, new_wc in conflicts[:120]:
+        warnings.append(
+            "CONFLICT\tglyph_shared\t"
+            f"{pair.hex().upper()}\t{old_jp}:{old_wc}\t{new_jp}:{new_wc}"
+        )
+
+    return sorted(assigned.values(), key=lambda row: bytes(row["sjis"]))
+
+
+def main() -> int:
+    if not INPUT.exists():
+        print(f"missing input: {INPUT}", file=sys.stderr)
+        return 1
+
+    rows: list[dict[str, object]] = []
+    warnings: list[str] = []
+    seen: set[str] = set()
+
+    with INPUT.open("r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f, delimiter="\t")
+        if not reader.fieldnames or "jp_name" not in reader.fieldnames or "cn_name" not in reader.fieldnames:
+            print("speaker_names_to_translate.tsv must contain jp_name and cn_name columns", file=sys.stderr)
+            return 1
+        for row in reader:
+            jp = row.get("jp_name", "") or ""
+            cn = row.get("cn_name", "") or ""
+            add_name(rows, seen, warnings, jp, cn)
+            if "の" in jp:
+                add_name(rows, seen, warnings, jp.replace("の", ""), cn)
+
+    rows.sort(key=lambda r: (-int(r["glyphs"]), str(r["jp"])))
+    if len(rows) > MAX_NAMES:
+        warnings.append(f"TRUNCATE\ttable_too_large\t{len(rows)}>{MAX_NAMES}")
+        rows = rows[:MAX_NAMES]
+    glyph_rows = build_glyph_rows(rows, warnings)
+
+    lines = [
+        "/* Generated by tools/make_zpgdi_builtin_names.py. */",
+        "/* Source: _work/text/speaker_names_to_translate.tsv */",
+        "",
+        "static const NameEntry ZPGDI_BUILTIN_NAMES[] = {",
+    ]
+    for idx, row in enumerate(rows, 1):
+        sjis = list(row["sjis"])  # type: ignore[arg-type]
+        lines.append(
+            f"    {{ {{{c_array(sjis)}}}, {row['glyphs']}, {{{c_warray(str(row['cn']))}}}, {len(str(row['cn']))} }},"
+            f" /* row {idx} */"
+        )
+    lines.extend(
+        [
+            "};",
+            f"static const int ZPGDI_BUILTIN_NAME_COUNT = {len(rows)};",
+            "",
+            "static const GlyphEntry ZPGDI_BUILTIN_GLYPHS[] = {",
+        ]
+    )
+    for idx, row in enumerate(glyph_rows, 1):
+        sjis = list(row["sjis"])  # type: ignore[arg-type]
+        wc = str(row["wc"])
+        lines.append(f"    {{ {{{c_array(sjis)}}}, 0x{ord(wc):04X} }}, /* glyph {idx} */")
+    lines.extend(
+        [
+            "};",
+            f"static const int ZPGDI_BUILTIN_GLYPH_COUNT = {len(glyph_rows)};",
+            "",
+        ]
+    )
+    OUTPUT.write_text("\n".join(lines), encoding="ascii")
+
+    REPORT.parent.mkdir(parents=True, exist_ok=True)
+    with REPORT.open("w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.writer(f, delimiter="\t")
+        writer.writerow(["kind", "jp_name", "cn_name", "glyphs", "sjis_hex"])
+        for row in rows:
+            writer.writerow(
+                [
+                    "name",
+                    row["jp"],
+                    row["cn"],
+                    row["glyphs"],
+                    " ".join(f"{b:02X}" for b in row["sjis"]),  # type: ignore[union-attr]
+                ]
+            )
+        for warning in warnings:
+            writer.writerow(warning.split("\t"))
+        writer.writerow([])
+        writer.writerow(["kind", "sjis_hex", "cn_char", "source_jp_name", "priority"])
+        for row in glyph_rows:
+            writer.writerow(
+                [
+                    "glyph",
+                    " ".join(f"{b:02X}" for b in row["sjis"]),  # type: ignore[union-attr]
+                    row["wc"],
+                    row["jp"],
+                    row["priority"],
+                ]
+            )
+
+    print(f"wrote {OUTPUT} with {len(rows)} names")
+    print(f"wrote {REPORT} with {len(warnings)} warnings")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

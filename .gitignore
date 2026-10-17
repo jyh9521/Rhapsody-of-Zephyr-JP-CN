@@ -1,0 +1,47 @@
+# Original game files and redistributable build outputs
+*.exe
+*.dll
+*.lib
+*.hdr
+*.dat
+*.sav
+*.bak
+*.ttf
+*.otf
+*.wav
+*.mp3
+*.ogg
+*.mid
+*.bmp
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.xlsx
+
+# Game and archive directories
+/bgm/
+/CD/
+/maps/
+/objs/
+/save/
+/_archive/
+/_work/
+/0716更新/
+/.codex/
+/.agents/
+/.codex-remote-attachments/
+
+# Generated project files
+/_wtest
+/zpgdi.log
+/dgVoodoo.conf
+/falcom.inf
+/tools/zpgdi_builtin_names.h
+/tools/apply_no_cd_patch.js
+__pycache__/
+*.py[cod]
+
+# Editor and OS metadata
+.DS_Store
+Thumbs.db

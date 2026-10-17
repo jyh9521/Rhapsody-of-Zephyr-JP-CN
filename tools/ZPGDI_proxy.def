@@ -1,0 +1,16 @@
+LIBRARY ZPGDI
+EXPORTS
+    CreateCompatibleDC
+    CreateDCA
+    CreateDIBSection
+    CreateFontA
+    CreatePalette
+    DeleteDC
+    DeleteObject
+    GetObjectA
+    SelectObject
+    SelectPalette
+    SetBkMode
+    SetTextColor
+    StretchDIBits
+    TextOutA
